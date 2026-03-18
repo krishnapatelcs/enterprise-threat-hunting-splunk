@@ -21,6 +21,23 @@ This project demonstrates the design and implementation of an enterprise-style t
 
 ---
 
+## Tools & Resources
+
+| Tool | Purpose | Link |
+|---|---|---|
+| Splunk Enterprise | SIEM platform for log ingestion, detection, and dashboards | [Download](https://www.splunk.com/en_us/download/splunk-enterprise.html) |
+| Splunk Universal Forwarder | Ships logs from Windows VM to Splunk | [Download](https://www.splunk.com/en_us/download/universal-forwarder.html) |
+| Sysmon (Sysinternals) | Enhanced Windows endpoint telemetry | [Download](https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon) |
+| SwiftOnSecurity Sysmon Config | Production-ready Sysmon configuration file | [GitHub](https://github.com/SwiftOnSecurity/sysmon-config) |
+| UTM Hypervisor | ARM64 virtualization on Apple Silicon Mac | [Download](https://mac.getutm.app/) |
+| Kali Linux | Attack simulation platform | [Download](https://www.kali.org/get-kali/) |
+| Windows 11 ARM64 | Target endpoint and log source | [Download](https://www.microsoft.com/en-us/software-download/windows11) |
+| MITRE ATT&CK Framework | Threat intelligence and technique mapping | [Website](https://attack.mitre.org/) |
+| xfreerdp | RDP client for attack simulation from Kali | Pre-installed on Kali Linux |
+| Hydra | Password brute-force tool (tested, replaced with loop script) | Pre-installed on Kali Linux |
+
+---
+
 ## Detection Rules
 
 | Rule | ATT&CK ID | Description | Key Event IDs |
@@ -29,7 +46,7 @@ This project demonstrates the design and implementation of an enterprise-style t
 | Login After Failures | T1110 | Detects successful login following 5+ failures | 4624, 4625 |
 | Encoded PowerShell Execution | T1059.001 | Detects -EncodedCommand flag via Sysmon | Sysmon EID 1 |
 | New Admin Account Creation | T1136.001 | Detects new user added to Administrators group | 4720, 4732 |
-| Multi-Stage Attack Chain | T1110 + T1059.001 + T1136.001 | Correlates 3+ attack stages by Account_Name across brute force, execution, and persistence | 4625, 4624, Sysmon EID 1, 4720, 4732 |
+| Multi-Stage Attack Chain | T1110 + T1059.001 + T1136.001 | Correlates 3+ attack stages across brute force, execution, and persistence | 4625, 4624, Sysmon EID 1, 4720, 4732 |
 
 ---
 
@@ -89,7 +106,208 @@ index=wineventlog (EventCode=4625 OR EventCode=4624)
 
 ---
 
-## Attack Simulations
+## Full Project Command Reference
+
+A complete step-by-step record of every command run during this project.
+
+### Step 1 — Sysmon Installation (Windows 11 ARM64)
+
+> **Note:** Standard `Sysmon64.exe` fails on ARM64 Windows with `errorCode=5`. Use `Sysmon64a.exe` — the ARM64-specific binary included in the same download package.
+
+```cmd
+:: Navigate to Sysmon directory
+cd C:\Tools\Sysmon
+
+:: Install Sysmon with SwiftOnSecurity config (ARM64 binary)
+Sysmon64a.exe -accepteula -i sysmonconfig-export.xml
+
+:: Verify Sysmon is running
+sc query sysmon64a
+```
+
+Expected output:
+```
+SERVICE_NAME: sysmon64a
+    STATE : 4  RUNNING
+```
+
+---
+
+### Step 2 — Windows Audit Policy Configuration
+
+```cmd
+:: Apply Group Policy changes immediately
+gpupdate /force
+
+:: Verify each audit subcategory
+auditpol /get /subcategory:"Logon"
+auditpol /get /subcategory:"Account Lockout"
+auditpol /get /subcategory:"User Account Management"
+auditpol /get /subcategory:"Process Creation"
+```
+
+Enable via `gpedit.msc`:
+```
+Computer Configuration → Windows Settings → Security Settings
+→ Local Policies → Audit Policy
+→ Enable: Audit logon events, Audit account management,
+          Audit process tracking (Success & Failure)
+
+Computer Configuration → Administrative Templates
+→ Windows Components → Windows PowerShell
+→ Turn on PowerShell Script Block Logging → Enabled
+```
+
+---
+
+### Step 3 — Enable RDP on Windows VM
+
+```cmd
+:: Open RDP port in Windows Firewall
+netsh advfirewall firewall add rule name="RDP" protocol=TCP dir=in localport=3389 action=allow
+
+:: Check Windows VM IP address
+ipconfig
+```
+
+Enable via `sysdm.cpl` → Remote tab → Allow remote connections
+
+---
+
+### Step 4 — Splunk Setup (macOS)
+
+```bash
+# Start Splunk
+cd /Applications/splunk/bin
+./splunk start --accept-license
+
+# Enable Splunk on boot
+./splunk enable boot-start
+
+# Access Splunk: http://127.0.0.1:8000
+```
+
+In Splunk web UI:
+```
+Settings → Forwarding and Receiving → Configure Receiving → Add New → Port: 9997
+Settings → Indexes → New Index → Name: wineventlog
+Settings → Indexes → New Index → Name: sysmon
+```
+
+---
+
+### Step 5 — Splunk Universal Forwarder Setup (Windows VM)
+
+```cmd
+:: Navigate to local config folder
+cd "C:\Program Files\SplunkUniversalForwarder\etc\apps\SplunkUniversalForwarder\local"
+
+:: Create inputs.conf
+notepad inputs.conf
+```
+
+Paste into inputs.conf:
+```ini
+[WinEventLog://Security]
+disabled = false
+index = wineventlog
+
+[WinEventLog://System]
+disabled = false
+index = wineventlog
+
+[WinEventLog://Microsoft-Windows-Sysmon/Operational]
+disabled = false
+renderXml = true
+index = sysmon
+```
+
+```cmd
+:: Rename if Notepad added .txt extension
+ren inputs.conf.txt inputs.conf
+
+:: Fix Sysmon channel permissions
+wevtutil set-log "Microsoft-Windows-Sysmon/Operational" /ca:"O:BAG:SYD:(A;;0x1;;;SY)(A;;0x1;;;BA)(A;;0x1;;;NS)"
+
+:: Restart the forwarder
+cd "C:\Program Files\SplunkUniversalForwarder\bin"
+splunk restart
+
+:: Verify forwarder is running
+sc query SplunkForwarder
+
+:: Verify outputs.conf points to Splunk host
+type "C:\Program Files\SplunkUniversalForwarder\etc\system\local\outputs.conf"
+```
+
+> **Note:** In `services.msc`, set SplunkForwarder to run as **Local System account** to resolve Sysmon channel permission errors.
+
+---
+
+### Step 6 — Verify Logs in Splunk
+
+```spl
+index=wineventlog | head 10
+index=sysmon | head 10
+index=wineventlog | stats count by EventCode | sort -count
+```
+
+Test connectivity from Windows VM:
+```powershell
+Test-NetConnection -ComputerName 172.16.37.32 -Port 9997
+```
+
+---
+
+### Step 7 — Attack Simulations (Kali Linux)
+
+**Single failed RDP login:**
+```bash
+xfreerdp /u:wronguser /p:wrongpass /v:192.168.64.10
+```
+
+**Brute force simulation — 20 failed attempts (triggers Rule 1):**
+```bash
+for i in {1..20}; do
+  xfreerdp /u:administrator /p:wrongpass$i /v:192.168.64.10 +auth-only 2>/dev/null
+  echo "Attempt $i done"
+done
+```
+
+**Successful login after brute force (triggers Rule 2):**
+```bash
+xfreerdp /u:Krishna /p:windows /v:192.168.64.10
+```
+
+---
+
+### Step 8 — Attack Simulations (Windows VM)
+
+**Disable Windows Defender for simulation:**
+```powershell
+Set-MpPreference -DisableRealtimeMonitoring $true
+```
+
+**Generate and run encoded PowerShell (triggers Rule 3):**
+```powershell
+$command = "Write-Host 'Simulated Attack'"
+$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+Write-Host $encoded
+
+powershell -EncodedCommand <paste_encoded_output_here>
+```
+
+**Create new admin account (triggers Rule 4):**
+```cmd
+net user hacker P@ssword123! /add
+net localgroup Administrators hacker /add
+```
+
+**Rule 5 (Multi-Stage Chain) fires automatically** from the cumulative events of Steps 7 and 8.
+
+---
+
+## Attack Simulations Summary
 
 All simulations were performed in an isolated lab environment.
 
@@ -119,6 +337,8 @@ All simulations were performed in an isolated lab environment.
 - **Field Names:** Windows Event Log uses `Source_Network_Address`, not `src_ip`
 - **XML Parsing:** Sysmon uses `XmlWinEventLog` sourcetype — `rex` required to extract fields
 - **Forwarder Permissions:** SplunkForwarder must run as Local System to read Sysmon channel
+- **Hydra RDP Module:** Experimental and unreliable on ARM64 — replaced with xfreerdp loop script
+- **Account Lockout:** Disable lockout policy on Windows VM before running brute force simulations
 
 ---
 
@@ -132,6 +352,12 @@ All simulations were performed in an isolated lab environment.
 - Attack simulation with xfreerdp and encoded PowerShell payloads
 - SOC dashboard design for real-time visibility
 - ARM64-specific troubleshooting in Apple Silicon home lab
+
+---
+
+## Project Report
+
+Full project documentation including all screenshots, SPL queries, risk assessment, and lessons learned is available in the repository: [Final_Project_Definition.pdf](./Final_Project_Definition.pdf)
 
 ---
 
