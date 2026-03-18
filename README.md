@@ -25,16 +25,16 @@ This project demonstrates the design and implementation of an enterprise-style t
 
 | Tool | Purpose | Link |
 |---|---|---|
-| Splunk Enterprise | SIEM platform for log ingestion, detection, and dashboards | [Download](https://www.splunk.com/en_us/download/splunk-enterprise.html) |
+| Splunk Enterprise | SIEM platform | [Download](https://www.splunk.com/en_us/download/splunk-enterprise.html) |
 | Splunk Universal Forwarder | Ships logs from Windows VM to Splunk | [Download](https://www.splunk.com/en_us/download/universal-forwarder.html) |
 | Sysmon (Sysinternals) | Enhanced Windows endpoint telemetry | [Download](https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon) |
-| SwiftOnSecurity Sysmon Config | Production-ready Sysmon configuration file | [GitHub](https://github.com/SwiftOnSecurity/sysmon-config) |
-| UTM Hypervisor | ARM64 virtualization on Apple Silicon Mac | [Download](https://mac.getutm.app/) |
+| SwiftOnSecurity Sysmon Config | Production-ready Sysmon configuration | [GitHub](https://github.com/SwiftOnSecurity/sysmon-config) |
+| UTM Hypervisor | ARM64 virtualization on Apple Silicon | [Download](https://mac.getutm.app/) |
 | Kali Linux | Attack simulation platform | [Download](https://www.kali.org/get-kali/) |
 | Windows 11 ARM64 | Target endpoint and log source | [Download](https://www.microsoft.com/en-us/software-download/windows11) |
-| MITRE ATT&CK Framework | Threat intelligence and technique mapping | [Website](https://attack.mitre.org/) |
-| xfreerdp | RDP client for attack simulation from Kali | Pre-installed on Kali Linux |
-| Hydra | Password brute-force tool (tested, replaced with loop script) | Pre-installed on Kali Linux |
+| MITRE ATT&CK | Threat intelligence and technique mapping | [Website](https://attack.mitre.org/) |
+| xfreerdp | RDP client for Kali attack simulation | Pre-installed on Kali Linux |
+| Hydra | Brute-force tool (tested, replaced with loop script) | Pre-installed on Kali Linux |
 
 ---
 
@@ -42,17 +42,235 @@ This project demonstrates the design and implementation of an enterprise-style t
 
 | Rule | ATT&CK ID | Description | Key Event IDs |
 |---|---|---|---|
-| Brute Force Login Detection | T1110.001 | Detects 10+ failed logins from same IP in 5 minutes | 4625 |
-| Login After Failures | T1110 | Detects successful login following 5+ failures | 4624, 4625 |
-| Encoded PowerShell Execution | T1059.001 | Detects -EncodedCommand flag via Sysmon | Sysmon EID 1 |
-| New Admin Account Creation | T1136.001 | Detects new user added to Administrators group | 4720, 4732 |
-| Multi-Stage Attack Chain | T1110 + T1059.001 + T1136.001 | Correlates 3+ attack stages across brute force, execution, and persistence | 4625, 4624, Sysmon EID 1, 4720, 4732 |
+| Rule 1 — Brute Force Login Detection | T1110.001 | Detects 10+ failed logins from same IP in 5 minutes | 4625 |
+| Rule 2 — Login After Failures | T1110 | Detects successful login following 5+ failures | 4624, 4625 |
+| Rule 3 — Encoded PowerShell Execution | T1059.001 | Detects -EncodedCommand flag via Sysmon | Sysmon EID 1 |
+| Rule 4 — New Admin Account Creation | T1136.001 | Detects new user added to Administrators group | 4720, 4732 |
+| Rule 5 — Multi-Stage Attack Chain | T1110 + T1059.001 + T1136.001 | Correlates 3+ attack stages across brute force, execution, and persistence | 4625, 4624, Sysmon EID 1, 4720, 4732 |
 
 ---
 
-## SPL Queries
+## Project Walkthrough — Step by Step
 
-**Rule 1 — Brute Force Detection**
+A complete record of everything done in this project from start to finish.
+
+---
+
+### Step 1 — Install Sysmon on Windows 11 VM
+
+**Downloads required:**
+- [Sysmon (Sysinternals)](https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon)
+- [SwiftOnSecurity config](https://github.com/SwiftOnSecurity/sysmon-config) — download ZIP, extract `sysmonconfig-export.xml`
+
+Place both files in `C:\Tools\Sysmon\`
+
+> ⚠️ **ARM64 Note:** `Sysmon64.exe` fails on Apple Silicon VMs with `errorCode=5`. Use `Sysmon64a.exe` — the ARM64 binary included in the same download package.
+
+Open **CMD as Administrator** and run:
+```cmd
+cd C:\Tools\Sysmon
+Sysmon64a.exe -accepteula -i sysmonconfig-export.xml
+```
+
+Verify it is running:
+```cmd
+sc query sysmon64a
+```
+
+Expected output:
+```
+SERVICE_NAME: sysmon64a
+    STATE : 4  RUNNING
+```
+
+Verify logs appear in Event Viewer:
+```
+Applications and Services Logs → Microsoft → Windows → Sysmon → Operational
+```
+
+---
+
+### Step 2 — Enable Windows Audit Policies
+
+Open `gpedit.msc` and navigate to:
+```
+Computer Configuration → Windows Settings → Security Settings
+→ Local Policies → Audit Policy
+```
+
+Enable **Success and Failure** for:
+- Audit logon events
+- Audit account management
+- Audit process tracking
+
+Also enable PowerShell Script Block Logging:
+```
+Computer Configuration → Administrative Templates
+→ Windows Components → Windows PowerShell
+→ Turn on PowerShell Script Block Logging → Enabled
+```
+
+Apply changes:
+```cmd
+gpupdate /force
+```
+
+Verify each policy:
+```cmd
+auditpol /get /subcategory:"Logon"
+auditpol /get /subcategory:"Account Lockout"
+auditpol /get /subcategory:"User Account Management"
+auditpol /get /subcategory:"Process Creation"
+```
+
+All four should show `Success and Failure`.
+
+---
+
+### Step 3 — Enable RDP on Windows VM
+
+Open `sysdm.cpl` → **Remote** tab → select **Allow remote connections to this computer**
+
+Open firewall port:
+```cmd
+netsh advfirewall firewall add rule name="RDP" protocol=TCP dir=in localport=3389 action=allow
+```
+
+Find your Windows VM IP:
+```cmd
+ipconfig
+```
+
+Test from Kali to confirm RDP is reachable:
+```bash
+xfreerdp /u:wronguser /p:wrongpass /v:192.168.64.10
+```
+
+A login failure (not a connection failure) confirms RDP is working and generating Event ID 4625.
+
+---
+
+### Step 4 — Install Splunk Enterprise on Mac
+
+Download from [splunk.com](https://www.splunk.com/en_us/download/splunk-enterprise.html) — select **macOS .dmg**
+
+After installing, open **Terminal** on Mac:
+```bash
+cd /Applications/splunk/bin
+./splunk start --accept-license
+./splunk enable boot-start
+```
+
+Access Splunk in browser:
+```
+http://127.0.0.1:8000
+```
+
+---
+
+### Step 5 — Configure Splunk to Receive Logs
+
+In Splunk web UI:
+
+**Enable receiving on port 9997:**
+```
+Settings → Forwarding and Receiving → Receive Data → Configure Receiving → Add New → 9997 → Save
+```
+
+**Create indexes:**
+```
+Settings → Indexes → New Index → Name: wineventlog → Save
+Settings → Indexes → New Index → Name: sysmon → Save
+```
+
+---
+
+### Step 6 — Install Splunk Universal Forwarder on Windows VM
+
+Download from [splunk.com](https://www.splunk.com/en_us/download/universal-forwarder.html) — select **Windows 64-bit MSI**
+
+During installation:
+- Select **An on-premises Splunk Enterprise instance**
+- **Deployment Server:** leave blank
+- **Receiving Indexer:** enter your Mac IP and port `172.16.37.32:9997`
+
+After installation, navigate to the local config folder:
+```cmd
+cd "C:\Program Files\SplunkUniversalForwarder\etc\apps\SplunkUniversalForwarder\local"
+notepad inputs.conf
+```
+
+Paste this content:
+```ini
+[WinEventLog://Security]
+disabled = false
+index = wineventlog
+
+[WinEventLog://System]
+disabled = false
+index = wineventlog
+
+[WinEventLog://Microsoft-Windows-Sysmon/Operational]
+disabled = false
+renderXml = true
+index = sysmon
+```
+
+Save the file. If Notepad added `.txt`:
+```cmd
+ren inputs.conf.txt inputs.conf
+```
+
+Fix Sysmon channel permissions:
+```cmd
+wevtutil set-log "Microsoft-Windows-Sysmon/Operational" /ca:"O:BAG:SYD:(A;;0x1;;;SY)(A;;0x1;;;BA)(A;;0x1;;;NS)"
+```
+
+> ⚠️ Open `services.msc` → find **SplunkForwarder** → Properties → Log On tab → select **Local System account** → OK
+
+Restart the forwarder:
+```cmd
+cd "C:\Program Files\SplunkUniversalForwarder\bin"
+splunk restart
+```
+
+Verify it is running:
+```cmd
+sc query SplunkForwarder
+```
+
+Verify connectivity from Windows VM:
+```powershell
+Test-NetConnection -ComputerName 172.16.37.32 -Port 9997
+```
+
+Should show `TcpTestSucceeded : True`
+
+---
+
+### Step 7 — Verify Logs Are Flowing in Splunk
+
+In Splunk Search & Reporting, run with **All time** selected:
+```
+index=wineventlog | head 10
+index=sysmon | head 10
+```
+
+Both should return events. If sysmon returns nothing, check:
+```cmd
+type "C:\Program Files\SplunkUniversalForwarder\var\log\splunk\splunkd.log" | findstr ERROR
+```
+
+---
+
+### Step 8 — Build Detection Rules in Splunk
+
+For each rule, run the SPL search in Splunk → click **Save As → Alert** → set:
+- Alert type: **Real-time**
+- Trigger condition: **Per-Result**
+- Trigger action: **Add to Triggered Alerts**
+
+**Rule 1 — Brute Force Login Detection (T1110.001)**
 ```spl
 index=wineventlog EventCode=4625
 | bucket _time span=5m
@@ -60,7 +278,7 @@ index=wineventlog EventCode=4625
 | where count > 10 | sort -count
 ```
 
-**Rule 2 — Login After Failures**
+**Rule 2 — Login After Failures (T1110)**
 ```spl
 index=wineventlog (EventCode=4625 OR EventCode=4624)
 | eval status=if(EventCode=4624,"success","failure")
@@ -70,7 +288,7 @@ index=wineventlog (EventCode=4625 OR EventCode=4624)
 | where fails>=5 AND successes>=1
 ```
 
-**Rule 3 — Encoded PowerShell (Sysmon XML)**
+**Rule 3 — Encoded PowerShell (T1059.001)**
 ```spl
 index=sysmon source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
 | rex field=_raw "<Data Name='Image'>(?<Image>[^<]+)</Data>"
@@ -79,14 +297,14 @@ index=sysmon source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
 | table _time, Image, CommandLine
 ```
 
-**Rule 4 — New Admin Account**
+**Rule 4 — New Admin Account Creation (T1136.001)**
 ```spl
 index=wineventlog (EventCode=4720 OR EventCode=4732)
 | table _time, EventCode, Account_Name, SubjectUserName
 | sort -_time
 ```
 
-**Rule 5 — Multi-Stage Attack Chain**
+**Rule 5 — Multi-Stage Attack Chain (T1110 + T1059.001 + T1136.001)**
 ```spl
 index=wineventlog (EventCode=4625 OR EventCode=4624)
 | eval stage=case(
@@ -106,167 +324,16 @@ index=wineventlog (EventCode=4625 OR EventCode=4624)
 
 ---
 
-## Full Project Command Reference
+### Step 9 — Run Attack Simulations
 
-A complete step-by-step record of every command run during this project.
+> ⚠️ All simulations performed in an isolated lab environment. No real systems or networks were targeted.
 
-### Step 1 — Sysmon Installation (Windows 11 ARM64)
-
-> **Note:** Standard `Sysmon64.exe` fails on ARM64 Windows with `errorCode=5`. Use `Sysmon64a.exe` — the ARM64-specific binary included in the same download package.
-
-```cmd
-:: Navigate to Sysmon directory
-cd C:\Tools\Sysmon
-
-:: Install Sysmon with SwiftOnSecurity config (ARM64 binary)
-Sysmon64a.exe -accepteula -i sysmonconfig-export.xml
-
-:: Verify Sysmon is running
-sc query sysmon64a
-```
-
-Expected output:
-```
-SERVICE_NAME: sysmon64a
-    STATE : 4  RUNNING
-```
-
----
-
-### Step 2 — Windows Audit Policy Configuration
-
-```cmd
-:: Apply Group Policy changes immediately
-gpupdate /force
-
-:: Verify each audit subcategory
-auditpol /get /subcategory:"Logon"
-auditpol /get /subcategory:"Account Lockout"
-auditpol /get /subcategory:"User Account Management"
-auditpol /get /subcategory:"Process Creation"
-```
-
-Enable via `gpedit.msc`:
-```
-Computer Configuration → Windows Settings → Security Settings
-→ Local Policies → Audit Policy
-→ Enable: Audit logon events, Audit account management,
-          Audit process tracking (Success & Failure)
-
-Computer Configuration → Administrative Templates
-→ Windows Components → Windows PowerShell
-→ Turn on PowerShell Script Block Logging → Enabled
-```
-
----
-
-### Step 3 — Enable RDP on Windows VM
-
-```cmd
-:: Open RDP port in Windows Firewall
-netsh advfirewall firewall add rule name="RDP" protocol=TCP dir=in localport=3389 action=allow
-
-:: Check Windows VM IP address
-ipconfig
-```
-
-Enable via `sysdm.cpl` → Remote tab → Allow remote connections
-
----
-
-### Step 4 — Splunk Setup (macOS)
-
-```bash
-# Start Splunk
-cd /Applications/splunk/bin
-./splunk start --accept-license
-
-# Enable Splunk on boot
-./splunk enable boot-start
-
-# Access Splunk: http://127.0.0.1:8000
-```
-
-In Splunk web UI:
-```
-Settings → Forwarding and Receiving → Configure Receiving → Add New → Port: 9997
-Settings → Indexes → New Index → Name: wineventlog
-Settings → Indexes → New Index → Name: sysmon
-```
-
----
-
-### Step 5 — Splunk Universal Forwarder Setup (Windows VM)
-
-```cmd
-:: Navigate to local config folder
-cd "C:\Program Files\SplunkUniversalForwarder\etc\apps\SplunkUniversalForwarder\local"
-
-:: Create inputs.conf
-notepad inputs.conf
-```
-
-Paste into inputs.conf:
-```ini
-[WinEventLog://Security]
-disabled = false
-index = wineventlog
-
-[WinEventLog://System]
-disabled = false
-index = wineventlog
-
-[WinEventLog://Microsoft-Windows-Sysmon/Operational]
-disabled = false
-renderXml = true
-index = sysmon
-```
-
-```cmd
-:: Rename if Notepad added .txt extension
-ren inputs.conf.txt inputs.conf
-
-:: Fix Sysmon channel permissions
-wevtutil set-log "Microsoft-Windows-Sysmon/Operational" /ca:"O:BAG:SYD:(A;;0x1;;;SY)(A;;0x1;;;BA)(A;;0x1;;;NS)"
-
-:: Restart the forwarder
-cd "C:\Program Files\SplunkUniversalForwarder\bin"
-splunk restart
-
-:: Verify forwarder is running
-sc query SplunkForwarder
-
-:: Verify outputs.conf points to Splunk host
-type "C:\Program Files\SplunkUniversalForwarder\etc\system\local\outputs.conf"
-```
-
-> **Note:** In `services.msc`, set SplunkForwarder to run as **Local System account** to resolve Sysmon channel permission errors.
-
----
-
-### Step 6 — Verify Logs in Splunk
-
-```spl
-index=wineventlog | head 10
-index=sysmon | head 10
-index=wineventlog | stats count by EventCode | sort -count
-```
-
-Test connectivity from Windows VM:
-```powershell
-Test-NetConnection -ComputerName 172.16.37.32 -Port 9997
-```
-
----
-
-### Step 7 — Attack Simulations (Kali Linux)
-
-**Single failed RDP login:**
+**On Kali Linux — Single failed RDP login (confirms Event ID 4625 capture):**
 ```bash
 xfreerdp /u:wronguser /p:wrongpass /v:192.168.64.10
 ```
 
-**Brute force simulation — 20 failed attempts (triggers Rule 1):**
+**On Kali Linux — Brute force simulation (triggers Rule 1):**
 ```bash
 for i in {1..20}; do
   xfreerdp /u:administrator /p:wrongpass$i /v:192.168.64.10 +auth-only 2>/dev/null
@@ -274,21 +341,17 @@ for i in {1..20}; do
 done
 ```
 
-**Successful login after brute force (triggers Rule 2):**
+**On Kali Linux — Successful login after failures (triggers Rule 2):**
 ```bash
 xfreerdp /u:Krishna /p:windows /v:192.168.64.10
 ```
 
----
-
-### Step 8 — Attack Simulations (Windows VM)
-
-**Disable Windows Defender for simulation:**
+**On Windows VM — Disable Defender temporarily:**
 ```powershell
 Set-MpPreference -DisableRealtimeMonitoring $true
 ```
 
-**Generate and run encoded PowerShell (triggers Rule 3):**
+**On Windows VM — Encoded PowerShell simulation (triggers Rule 3):**
 ```powershell
 $command = "Write-Host 'Simulated Attack'"
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
@@ -297,25 +360,72 @@ Write-Host $encoded
 powershell -EncodedCommand <paste_encoded_output_here>
 ```
 
-**Create new admin account (triggers Rule 4):**
+**On Windows VM — New admin account creation (triggers Rule 4):**
 ```cmd
 net user hacker P@ssword123! /add
 net localgroup Administrators hacker /add
 ```
 
-**Rule 5 (Multi-Stage Chain) fires automatically** from the cumulative events of Steps 7 and 8.
+**Rule 5 fires automatically** from the cumulative events of all simulations above.
 
 ---
 
-## Attack Simulations Summary
+### Step 10 — Build SOC Dashboard in Splunk
 
-All simulations were performed in an isolated lab environment.
+In Splunk: **Dashboards → Create New Dashboard**
 
-- **Brute Force:** xfreerdp loop script — 20 failed RDP attempts from Kali Linux
-- **Credential Compromise:** Successful RDP login after brute force — triggering Rule 2
-- **Encoded PowerShell:** `powershell -EncodedCommand <base64>` executed on Windows VM
-- **Admin Account Creation:** `net user hacker /add` + `net localgroup Administrators hacker /add`
-- **Multi-Stage Chain:** Cumulative events from all simulations correlated automatically by Rule 5
+- Title: `Enterprise Threat Hunting SOC Dashboard`
+- Type: Classic Dashboard
+
+Add the following panels:
+
+**Panel 1 — Failed Login Attempts Over Time**
+```spl
+index=wineventlog EventCode=4625
+| timechart span=5m count as "Failed Logins"
+```
+Type: Line Chart
+
+**Panel 2 — Top Source IPs with Failed Logins**
+```spl
+index=wineventlog EventCode=4625
+| stats count by Source_Network_Address
+| sort -count | head 10
+```
+Type: Bar Chart
+
+**Panel 3 — Suspicious PowerShell Executions**
+```spl
+index=sysmon source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+| rex field=_raw "<Data Name='Image'>(?<Image>[^<]+)</Data>"
+| rex field=_raw "<Data Name='CommandLine'>(?<CommandLine>[^<]+)</Data>"
+| search CommandLine="*EncodedCommand*" OR CommandLine="*-enc*"
+| table _time, Image, CommandLine
+```
+Type: Statistics Table
+
+**Panel 4 — New Admin Account Creation Events**
+```spl
+index=wineventlog (EventCode=4720 OR EventCode=4732)
+| table _time, EventCode, Account_Name, SubjectUserName
+| sort -_time
+```
+Type: Statistics Table
+
+**Panel 5 — Multi-Stage Attack Chain**
+```spl
+index=wineventlog (EventCode=4625 OR EventCode=4624)
+| eval stage=case(EventCode=4625,"1_BruteForce",EventCode=4624,"2_InitialAccess")
+| append [search index=wineventlog (EventCode=4720 OR EventCode=4732)
+    | eval stage="4_Persistence"]
+| stats values(stage) as attack_stages by Account_Name
+| where mvcount(attack_stages) >= 2
+| eval chain=mvjoin(attack_stages," → ")
+| table Account_Name, chain
+```
+Type: Statistics Table
+
+Click **Save**.
 
 ---
 
@@ -327,7 +437,7 @@ All simulations were performed in an isolated lab environment.
 | Rule 2 — Login After Failure | ✅ Yes | None | 117 failures + 1 success from Kali IP |
 | Rule 3 — Encoded PowerShell | ✅ Yes | None | 10 Sysmon EID 1 events with -EncodedCommand |
 | Rule 4 — New Admin Account | ✅ Yes | None | EID 4720 + 4732 detected within seconds |
-| Rule 5 — Multi-Stage Chain | ✅ Yes | None | Attack chain 1_BruteForce → 2_InitialAccess → 4_Persistence across 131 correlated events |
+| Rule 5 — Multi-Stage Chain | ✅ Yes | None | Attack chain 1_BruteForce → 2_InitialAccess → 4_Persistence across 131 events |
 
 ---
 
@@ -357,7 +467,7 @@ All simulations were performed in an isolated lab environment.
 
 ## Project Report
 
-Full project documentation including all screenshots, SPL queries, risk assessment, and lessons learned is available in the repository: [Final_Project_Definition.pdf](./Final_Project_Definition.pdf)
+Full project documentation including all screenshots, SPL queries, risk assessment, and lessons learned: [Final_Project_Definition.pdf](./Final_Project_Definition.pdf)
 
 ---
 
