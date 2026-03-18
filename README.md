@@ -135,10 +135,4 @@ All simulations were performed in an isolated lab environment.
 
 ---
 
-## Project Report
-
-Full project documentation including all screenshots, SPL queries, risk assessment, and lessons learned is available in the repository.
-
----
-
 *Built by Krishna Patel | Cybersecurity Analyst | March 2026*
